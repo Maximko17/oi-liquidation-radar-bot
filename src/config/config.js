@@ -17,6 +17,11 @@ export const config = {
     chatId: process.env.TELEGRAM_CHAT_ID,
   },
 
+  pushover: {
+    token: process.env.PUSHOVER_TOKEN,
+    user: process.env.PUSHOVER_USER,
+  },
+
   app: {
     symbolRefreshIntervalMs: parseInt(process.env.SYMBOL_REFRESH_INTERVAL_MS || '900000', 10),
     oiFetchIntervalMs: parseInt(process.env.OI_FETCH_INTERVAL_MS || '60000', 10),

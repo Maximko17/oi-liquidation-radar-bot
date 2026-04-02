@@ -43,7 +43,7 @@ async initialize() {
 }
 
   /**
-   * Send OI spike alert to Telegram
+   * Send OI spike alert via Telegram and Pushover
    */
   async sendOISpikeAlert(signal) {
     if (!this.isConnected || !this.bot) {
@@ -77,8 +77,6 @@ async initialize() {
         change5m,
         change15m,
       });
-
-      return true;
     } catch (error) {
       logger.error('Failed to send Telegram alert', {
         symbol: signal.symbol,
@@ -86,6 +84,72 @@ async initialize() {
       });
       return false;
     }
+
+    // Send Pushover notification (non-blocking, never breaks flow)
+    this.sendPushoverAlert(signal).catch((err) => {
+      logger.error('Pushover alert failed', { error: err.message });
+    });
+
+    return true;
+  }
+
+  /**
+   * Send alert via Pushover HTTP API
+   */
+  async sendPushoverAlert(signal) {
+    if (!config.pushover.token || !config.pushover.user) {
+      logger.debug('Pushover not configured, skipping');
+      return;
+    }
+
+    const { symbol, type, change5m, change15m, strength, currentOI, timestamp } = signal;
+
+    const formatChange = (val) => (val >= 0 ? `+${val.toFixed(2)}%` : `${val.toFixed(2)}%`);
+    const strengthEmoji = this.getStrengthEmoji(strength);
+
+    const message = [
+      `OI Event Detected ${strengthEmoji}`,
+      ``,
+      `Symbol: ${symbol}`,
+      `Type: ${type}`,
+      ``,
+      `OI Change:`,
+      `  5m:  ${formatChange(change5m)}`,
+      `  15m: ${formatChange(change15m)}`,
+      ``,
+      `Signal Strength: ${strength}`,
+      `Current OI: ${currentOI.toLocaleString()}`,
+      ``,
+      `Bybit: https://www.bybit.com/trade/usdt/${symbol}`,
+      `Coinglass: https://www.coinglass.com/tv/ru/Bybit_${symbol}`,
+      ``,
+      `Timestamp: ${new Date(timestamp).toUTCString()}`,
+    ].join('\n');
+
+    const priority = strength === 'EXTREME' ? 2 : strength === 'STRONG' ? 1 : 0;
+
+    const body = new URLSearchParams({
+      token: config.pushover.token,
+      user: config.pushover.user,
+      message,
+      title: `OI Alert: ${symbol}`,
+      priority: String(priority),
+    });
+
+    logger.info('Sending Pushover alert', { symbol, strength, priority });
+
+    const response = await fetch('https://api.pushover.net/1/messages.json', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: body.toString(),
+    });
+
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`Pushover API error ${response.status}: ${text}`);
+    }
+
+    logger.info('Pushover alert sent', { symbol, strength });
   }
 
   /**
@@ -154,6 +218,43 @@ Timestamp: ${utcTime}
     const testMessage = '🟢 OI Spike Detector is online and working!';
     await this.bot.sendMessage(config.telegram.chatId, testMessage);
     logger.info('Test message sent to Telegram');
+  }
+
+  /**
+   * Send test Pushover message to verify configuration
+   */
+  async sendPushoverTestMessage() {
+    if (!config.pushover.token || !config.pushover.user) {
+      logger.debug('Pushover not configured, skipping test message');
+      return;
+    }
+
+    try {
+      const message = '🟢 OI Spike Detector — Pushover is configured and working!';
+
+      const body = new URLSearchParams({
+        token: config.pushover.token,
+        user: config.pushover.user,
+        message,
+        title: 'OI Detector Test',
+        priority: '0',
+      });
+
+      const response = await fetch('https://api.pushover.net/1/messages.json', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: body.toString(),
+      });
+
+      if (!response.ok) {
+        const text = await response.text();
+        throw new Error(`Pushover API error ${response.status}: ${text}`);
+      }
+
+      logger.info('Pushover test message sent');
+    } catch (error) {
+      logger.error('Failed to send Pushover test message', { error: error.message });
+    }
   }
 
 }

@@ -110,6 +110,9 @@ class Application {
         2, 3000, 'Startup notification'
       );
     }
+
+    // Send Pushover test message (non-fatal)
+    await alertService.sendPushoverTestMessage();
   }
 
   /**
