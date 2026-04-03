@@ -1,4 +1,7 @@
+import TelegramBot from 'node-telegram-bot-api';
 import { createLogger } from '../utils/logger.js';
+import { config } from '../config/config.js';
+import { withRetry } from '../utils/utils.js';
 import symbolService from './symbolService.js';
 import oiService from './oiService.js';
 import signalService from './signalService.js';
@@ -15,51 +18,117 @@ class TelegramService {
   constructor() {
     this.bot = null;
     this.isConnected = false;
+    this.reconnectInterval = null;
     // Map<chatId, { messageId: number, state: string, data: any }>
     this.chatUI = new Map();
   }
 
   /**
-   * Set the Telegram bot instance (dependency injection)
+   * Create and initialize the Telegram bot
+   * Returns true on success, false on failure
    */
-  setBot(bot) {
-    this.bot = bot;
+  async initialize() {
+    const ok = await withRetry(() => this._createBot(), 3, 5000, 'Telegram init');
+    return ok;
   }
 
   /**
-   * Initialize Telegram service (assumes bot already set)
-   * Returns true on success, false on failure (caller handles retries)
+   * Internal: create bot and set up handlers
    */
-  async initialize() {
-    if (!this.bot) {
-      logger.error('Cannot initialize telegram service: bot not set');
-      return false;
+  async _createBot() {
+    // Create bot instance with polling enabled
+    this.bot = new TelegramBot(config.telegram.botToken, { polling: true });
+
+    // Register commands in Telegram slash menu
+    await this.bot.setMyCommands([
+      { command: '/list', description: 'Show tracked symbols' },
+      { command: '/strategy', description: 'Bot trading strategy' }
+    ]);
+    logger.info('Command menu registered', { commands: ['/list', '/strategy'] });
+
+    // Set up command handlers
+    this.setupHandlers();
+
+    // Test connection
+    const botInfo = await this.bot.getMe();
+    logger.info('Telegram service initialized', {
+      username: botInfo.username,
+      botId: botInfo.id,
+    });
+    this.isConnected = true;
+    return true;
+  }
+
+  /**
+   * Start internal auto-reconnect loop
+   */
+  startReconnect() {
+    if (this.reconnectInterval) {
+      return; // Already running
     }
+    this.reconnectInterval = setInterval(async () => {
+      if (this.isConnected) {
+        clearInterval(this.reconnectInterval);
+        this.reconnectInterval = null;
+        return;
+      }
+      logger.info('Attempting Telegram reconnection...');
+      try {
+        // Clean up old bot if it exists
+        if (this.bot) {
+          try { this.bot.stopPolling(); } catch (e) {}
+          this.bot = null;
+        }
+        await this._createBot();
+        logger.info('Telegram reconnection successful', { username: this.bot.options.username });
+        clearInterval(this.reconnectInterval);
+        this.reconnectInterval = null;
+      } catch (error) {
+        logger.warn('Telegram reconnection failed, will retry in 60s', { error: error.message });
+      }
+    }, 60_000);
+  }
 
-    try {
-      // Register commands in Telegram slash menu
-      await this.bot.setMyCommands([
-        { command: '/list', description: 'Show tracked symbols' },
-        { command: '/strategy', description: 'Bot trading strategy' }
-      ]);
-      logger.info('Command menu registered', { commands: ['/list', '/strategy'] });
-
-      // Set up command handlers
-      this.setupHandlers();
-
-      // Test connection
-      const botInfo = await this.bot.getMe();
-      logger.info('Telegram service initialized', {
-        username: botInfo.username,
-        botId: botInfo.id,
-      });
-      this.isConnected = true;
-      return true;
-    } catch (error) {
-      logger.error('Failed to initialize Telegram service', { error: error.message });
+  /**
+   * Shutdown the Telegram bot
+   */
+  shutdown() {
+    if (this.reconnectInterval) {
+      clearInterval(this.reconnectInterval);
+      this.reconnectInterval = null;
+    }
+    if (this.bot) {
+      this.bot.stopPolling();
+      this.bot.close();
+      this.bot = null;
       this.isConnected = false;
-      return false;
+      logger.info('Telegram bot shutdown');
     }
+  }
+
+  /**
+   * Send an alert message (used by AlertService)
+   */
+  async sendAlert(message) {
+    if (!this.isConnected || !this.bot) {
+      throw new Error('Telegram bot not initialized');
+    }
+    await this.bot.sendMessage(config.telegram.chatId, message, {
+      parse_mode: 'HTML',
+      disable_web_page_preview: false,
+    });
+  }
+
+  /**
+   * Send a test message
+   */
+  async sendTestMessage() {
+    if (!this.isConnected || !this.bot) {
+      throw new Error('Telegram bot not initialized');
+    }
+    const testMessage = '🟢 OI Spike Detector is online and working!';
+    await this.bot.sendMessage(config.telegram.chatId, testMessage);
+    logger.info('Test message sent to Telegram');
   }
 
   /**
@@ -122,6 +191,13 @@ class TelegramService {
     });
 
     // Note: We don't handle unknown commands - let them be ignored
+
+    // Handle bot errors (network issues, connection drops)
+    this.bot.on('error', (error) => {
+      logger.error('Bot error detected', { error: error.message });
+      this.isConnected = false;
+      this.startReconnect();
+    });
   }
 
   /**
@@ -322,23 +398,23 @@ class TelegramService {
     const coinglassUrl = `https://www.coinglass.com/tv/ru/Bybit_${symbol}`;
 
     return `
-      📊 Symbol: <b>${symbol}</b>
+📊 Symbol: <b>${symbol}</b>
 
-      Open Interest:
-      • 5m change: <b>${change5mText}</b>${formatOIPair(previousOI5m, currentOI5m)}
-      • 15m change: <b>${change15mText}</b>${formatOIPair(previousOI15m, currentOI15m)}
+Open Interest:
+• 5m change: <b>${change5mText}</b>${formatOIPair(previousOI5m, currentOI5m)}
+• 15m change: <b>${change15mText}</b>${formatOIPair(previousOI15m, currentOI15m)}
 
-      Status:
-      • Signal strength: <b>${signalStrength}</b>
-      • Event type: <b>${signalType}</b>
+Status:
+• Signal strength: <b>${signalStrength}</b>
+• Event type: <b>${signalType}</b>
 
-      Market Info:
-      • 24h Volume: <b>$${volumeFormatted}</b>
-      • 24h Price Range: <b>${rangePercent}%</b>
+Market Info:
+• 24h Volume: <b>$${volumeFormatted}</b>
+• 24h Price Range: <b>${rangePercent}%</b>
 
-      Links:
-      Bybit: ${bybitUrl}
-      Coinglass: ${coinglassUrl}
+Links:
+Bybit: ${bybitUrl}
+Coinglass: ${coinglassUrl}
     `.trim();
   }
 
@@ -351,61 +427,61 @@ class TelegramService {
     this.chatUI.delete(chatId);
 
     const message = `
-      📊 <b>Trading Strategy Overview</b>
+📊 <b>Trading Strategy Overview</b>
 
-      This bot monitors <b>Open Interest (OI)</b> on Bybit cryptocurrency futures to detect abnormal market activity.
+This bot monitors <b>Open Interest (OI)</b> on Bybit cryptocurrency futures to detect abnormal market activity.
 
-      ━━━━━━━━━━━━━━━━━━━━━
+━━━━━━━━━━━━━━━━━━━━━
 
-      🎯 <b>What the Bot Monitors</b>
+🎯 <b>What the Bot Monitors</b>
 
-      • Open Interest changes on USDT perpetual futures
-      • Real-time OI data from Bybit API
+• Open Interest changes on USDT perpetual futures
+• Real-time OI data from Bybit API
 
-      📋 <b>Symbol Selection</b>
+📋 <b>Symbol Selection</b>
 
-      • High 24h volume (turnover > $50M)
-      • High 24h volatility (price range > 5%)
-      • Active symbols refreshed every 15 minutes
+• High 24h volume (turnover > $50M)
+• High 24h volatility (price range > 5%)
+• Active symbols refreshed every 15 minutes
 
-      ━━━━━━━━━━━━━━━━━━━━━
+━━━━━━━━━━━━━━━━━━━━━
 
-      📈 <b>Signal Types</b>
+📈 <b>Signal Types</b>
 
-      🟢 <b>BUILDUP</b>
-      • OI is increasing
-      • New positions are being opened
-      • Market is preparing for a move
+🟢 <b>BUILDUP</b>
+• OI is increasing
+• New positions are being opened
+• Market is preparing for a move
 
-      🔴 <b>LIQUIDATION</b>
-      • OI is decreasing
-      • Positions are being closed or liquidated
-      • Movement is already happening
+🔴 <b>LIQUIDATION</b>
+• OI is decreasing
+• Positions are being closed or liquidated
+• Movement is already happening
 
-      ━━━━━━━━━━━━━━━━━━━━━
+━━━━━━━━━━━━━━━━━━━━━
 
-      ⏱ <b>Timeframes</b>
+⏱ <b>Timeframes</b>
 
-      • <b>5-minute OI</b> → primary signal trigger
-      • <b>15-minute OI</b> → confirmation (must match direction)
+• <b>5-minute OI</b> → primary signal trigger
+• <b>15-minute OI</b> → confirmation (must match direction)
 
-      ━━━━━━━━━━━━━━━━━━━━━
+━━━━━━━━━━━━━━━━━━━━━
 
-      💪 <b>Signal Strength</b>
+💪 <b>Signal Strength</b>
 
-      Based on the percentage change in OI:
+Based on the percentage change in OI:
 
-      🟡 <b>WEAK</b> — 10–15% change
-      🟠 <b>STRONG</b> — 15–25% change
-      🔴 <b>EXTREME</b> — 25%+ change
+🟡 <b>WEAK</b> — 10–15% change
+🟠 <b>STRONG</b> — 15–25% change
+🔴 <b>EXTREME</b> — 25%+ change
 
-      ━━━━━━━━━━━━━━━━━━━━━
+━━━━━━━━━━━━━━━━━━━━━
 
-      🔔 <b>Alerts</b>
+🔔 <b>Alerts</b>
 
-      When a signal is detected, the bot sends a Telegram notification with the symbol, OI changes, signal type, and strength.
+When a signal is detected, the bot sends a Telegram notification with the symbol, OI changes, signal type, and strength.
 
-      Cooldown: 10 minutes per symbol to avoid spam.
+Cooldown: 10 minutes per symbol to avoid spam.
     `.trim();
 
     await this.bot.sendMessage(chatId, message, {

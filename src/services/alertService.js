@@ -1,60 +1,42 @@
 import { createLogger } from '../utils/logger.js';
-import { config } from '../config/config.js';
+import telegramService from './telegramService.js';
+import pushoverService from './pushoverService.js';
 
 const logger = createLogger('alert');
 
 class AlertService {
   constructor() {
-    this.bot = null;
-    this.isConnected = false;
+    this.isReady = false;
   }
 
   /**
- * Set the Telegram bot instance (dependency injection)
- */
-setBot(bot) {
-  this.bot = bot;
-}
-
-/**
- * Initialize alert service (assumes bot already set)
- * Returns true on success, false on failure (caller handles retries)
- */
-async initialize() {
-  if (!this.bot) {
-    logger.error('Cannot initialize alert service: bot not set');
-    return false;
-  }
-
-  try {
-    // Test connection
-    const botInfo = await this.bot.getMe();
-    logger.info('Alert service initialized', {
-      username: botInfo.username,
-      botId: botInfo.id,
-    });
-    this.isConnected = true;
+   * Initialize alert service (checks telegram is connected)
+   * Returns true on success, false on failure (caller handles retries)
+   */
+  async initialize() {
+    if (!telegramService.isConnected || !telegramService.bot) {
+      logger.error('Cannot initialize alert service: Telegram not connected');
+      this.isReady = false;
+      return false;
+    }
+    this.isReady = true;
+    logger.info('Alert service initialized');
     return true;
-  } catch (error) {
-    logger.error('Failed to initialize alert service', { error: error.message });
-    this.isConnected = false;
-    return false;
   }
-}
 
   /**
    * Send OI spike alert via Telegram and Pushover
    */
   async sendOISpikeAlert(signal) {
-    if (!this.isConnected || !this.bot) {
-      logger.error('Telegram bot not initialized');
+    if (!this.isReady) {
+      logger.error('Alert service not ready');
       return false;
     }
 
     try {
       const { symbol, type, change5m, change15m, strength, currentOI, previousOI5m, currentOI5m, previousOI15m, currentOI15m, timestamp, buildupChange5m, buildupStrength, buildupTimeAgoMinutes } = signal;
 
-      // Format message according to specification
+      // Format message once (HTML for Telegram)
       const message = this.formatAlertMessage({
         symbol,
         type,
@@ -72,10 +54,8 @@ async initialize() {
         buildupTimeAgoMinutes,
       });
 
-      await this.bot.sendMessage(config.telegram.chatId, message, {
-        parse_mode: 'HTML',
-        disable_web_page_preview: false,
-      });
+      // Send to Telegram
+      await telegramService.sendAlert(message);
 
       logger.info('Telegram alert sent', {
         symbol,
@@ -83,6 +63,11 @@ async initialize() {
         strength,
         change5m,
         change15m,
+      });
+
+      // Send same message to Pushover
+      pushoverService.sendAlert(message, signal).catch((err) => {
+        logger.error('Pushover alert failed', { error: err.message });
       });
     } catch (error) {
       logger.error('Failed to send Telegram alert', {
@@ -92,95 +77,7 @@ async initialize() {
       return false;
     }
 
-    // Send Pushover notification (non-blocking, never breaks flow)
-    this.sendPushoverAlert(signal).catch((err) => {
-      logger.error('Pushover alert failed', { error: err.message });
-    });
-
     return true;
-  }
-
-  /**
-   * Send alert via Pushover HTTP API
-   */
-  async sendPushoverAlert(signal) {
-    if (!config.pushover.token || !config.pushover.user) {
-      logger.debug('Pushover not configured, skipping');
-      return;
-    }
-
-    const { symbol, type, change5m, change15m, strength, currentOI, timestamp, buildupChange5m, buildupStrength, buildupTimeAgoMinutes } = signal;
-
-    const formatChange = (val) => (val >= 0 ? `+${val.toFixed(2)}%` : `${val.toFixed(2)}%`);
-    const strengthEmoji = this.getStrengthEmoji(strength);
-
-    let message;
-
-    if (type === 'CASCADE') {
-      message = [
-        `CASCADE DETECTED ${strengthEmoji}`,
-        ``,
-        `Symbol: ${symbol}`,
-        ``,
-        `Earlier:`,
-        `  BUILDUP ${formatChange(buildupChange5m)} (${buildupStrength}, ${buildupTimeAgoMinutes} min ago)`,
-        ``,
-        `Now:`,
-        `  LIQUIDATION ${formatChange(change5m)}`,
-        `  15m: ${formatChange(change15m)}`,
-        ``,
-        `Signal Strength: ${strength}`,
-        ``,
-        `Bybit: https://www.bybit.com/trade/usdt/${symbol}`,
-        `Coinglass: https://www.coinglass.com/tv/ru/Bybit_${symbol}`,
-        ``,
-        `Timestamp: ${new Date(timestamp).toUTCString()}`,
-      ].join('\n');
-    } else {
-      message = [
-        `OI Event Detected ${strengthEmoji}`,
-        ``,
-        `Symbol: ${symbol}`,
-        `Type: ${type}`,
-        ``,
-        `OI Change:`,
-        `  5m:  ${formatChange(change5m)}`,
-        `  15m: ${formatChange(change15m)}`,
-        ``,
-        `Signal Strength: ${strength}`,
-        ``,
-        `Bybit: https://www.bybit.com/trade/usdt/${symbol}`,
-        `Coinglass: https://www.coinglass.com/tv/ru/Bybit_${symbol}`,
-        ``,
-        `Timestamp: ${new Date(timestamp).toUTCString()}`,
-      ].join('\n');
-    }
-
-    // CASCADE always gets priority 2 (emergency)
-    const priority = type === 'CASCADE' ? 2 : strength === 'EXTREME' ? 2 : strength === 'STRONG' ? 1 : 0;
-
-    const body = new URLSearchParams({
-      token: config.pushover.token,
-      user: config.pushover.user,
-      message,
-      title: type === 'CASCADE' ? `CASCADE: ${symbol}` : `OI Alert: ${symbol}`,
-      priority: String(priority),
-    });
-
-    logger.info('Sending Pushover alert', { symbol, strength, priority });
-
-    const response = await fetch('https://api.pushover.net/1/messages.json', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: body.toString(),
-    });
-
-    if (!response.ok) {
-      const text = await response.text();
-      throw new Error(`Pushover API error ${response.status}: ${text}`);
-    }
-
-    logger.info('Pushover alert sent', { symbol, strength });
   }
 
   /**
@@ -269,50 +166,7 @@ Timestamp: ${utcTime}
    * Send test message to verify bot is working
    */
   async sendTestMessage() {
-    if (!this.isConnected || !this.bot) {
-      throw new Error('Bot not initialized');
-    }
-
-    const testMessage = '🟢 OI Spike Detector is online and working!';
-    await this.bot.sendMessage(config.telegram.chatId, testMessage);
-    logger.info('Test message sent to Telegram');
-  }
-
-  /**
-   * Send test Pushover message to verify configuration
-   */
-  async sendPushoverTestMessage() {
-    if (!config.pushover.token || !config.pushover.user) {
-      logger.debug('Pushover not configured, skipping test message');
-      return;
-    }
-
-    try {
-      const message = '🟢 OI Spike Detector — Pushover is configured and working!';
-
-      const body = new URLSearchParams({
-        token: config.pushover.token,
-        user: config.pushover.user,
-        message,
-        title: 'OI Detector Test',
-        priority: '0',
-      });
-
-      const response = await fetch('https://api.pushover.net/1/messages.json', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: body.toString(),
-      });
-
-      if (!response.ok) {
-        const text = await response.text();
-        throw new Error(`Pushover API error ${response.status}: ${text}`);
-      }
-
-      logger.info('Pushover test message sent');
-    } catch (error) {
-      logger.error('Failed to send Pushover test message', { error: error.message });
-    }
+    await telegramService.sendTestMessage();
   }
 
 }
