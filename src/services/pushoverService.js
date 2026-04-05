@@ -14,7 +14,7 @@ class PushoverService {
   /**
    * Send a plain text message via Pushover
    */
-  async send(message, title = 'OI Detector', priority = 0) {
+  async send(message, title = 'OI Scanner', priority = 0) {
     if (!this.isConfigured) {
       logger.debug('Pushover not configured, skipping');
       return false;
@@ -80,8 +80,8 @@ class PushoverService {
     }
 
     return this.send(
-      '🟢 OI Spike Detector — Pushover is configured and working!',
-      'OI Detector Test',
+      '🟢 OI Pressure Scanner — Pushover is configured and working!',
+      'OI Scanner Test',
       0
     );
   }
@@ -96,8 +96,8 @@ class PushoverService {
     }
 
     return this.send(
-      '🔴 OI Spike Detector is shutting down.',
-      'OI Detector Shutdown',
+      '🔴 OI Pressure Scanner is shutting down.',
+      'OI Scanner Shutdown',
       0
     );
   }

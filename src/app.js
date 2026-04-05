@@ -20,7 +20,7 @@ class Application {
    * Initialize and start the application
    */
   async initialize() {
-    logger.info('Initializing OI Spike Detector...', {
+    logger.info('Initializing OI Pressure Scanner...', {
       version: '1.0.0',
       config: {
         mainLoopIntervalMs: config.app.oiFetchIntervalMs,

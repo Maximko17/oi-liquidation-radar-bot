@@ -1,4 +1,4 @@
-# Bybit OI Spike Detector
+# OI Pressure Scanner
 
 Production-ready Node.js application that monitors cryptocurrency futures markets on Bybit and detects Open Interest (OI) spikes with Telegram and Pushover alerts. Supports both OI buildup (accumulation) and liquidation (position closing) detection.
 

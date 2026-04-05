@@ -126,7 +126,7 @@ class TelegramService {
     if (!this.isConnected || !this.bot) {
       throw new Error('Telegram bot not initialized');
     }
-    const testMessage = '🟢 OI Spike Detector is online and working!';
+    const testMessage = '🟢 OI Pressure Scanner is online and working!';
     await this.bot.sendMessage(config.telegram.chatId, testMessage);
     logger.info('Test message sent to Telegram');
   }
